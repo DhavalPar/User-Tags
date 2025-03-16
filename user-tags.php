@@ -1,9 +1,9 @@
 <?php
 /*
 Plugin Name: User Tags
-Description: A plugin to categorize users with custom taxonomies.
+Description: A plugin to categorize users with custom taxonomies and filter based on custom fields.
 Version: 1.0
-Author: Dhaval Parikh
+Author: Your Name
 */
 
 // Prevent direct access to the file
@@ -40,6 +40,10 @@ add_action('init', 'ut_register_user_taxonomy');
 
 // Add User Tags to user profiles
 function ut_add_user_taxonomy_to_profile($user) {
+    if (!current_user_can('edit_user', $user->ID)) {
+        return;
+    }
+
     $terms = get_terms(array(
         'taxonomy' => 'user_tag',
         'hide_empty' => false,
@@ -72,9 +76,17 @@ function ut_save_user_taxonomy($user_id) {
         return false;
     }
 
+    if (!isset($_POST['_wpnonce']) || !wp_verify_nonce($_POST['_wpnonce'], 'update-user_' . $user_id)) {
+        return;
+    }
+
     if (isset($_POST['user_tags'])) {
         $user_tags = array_map('intval', $_POST['user_tags']);
         wp_set_object_terms($user_id, $user_tags, 'user_tag', false);
+
+        // Update custom field in user meta
+        $primary_tag = !empty($user_tags) ? $user_tags[0] : ''; // Use the first tag as the primary tag
+        update_user_meta($user_id, 'primary_user_tag', $primary_tag);
     }
 }
 add_action('personal_options_update', 'ut_save_user_taxonomy');
@@ -82,12 +94,17 @@ add_action('edit_user_profile_update', 'ut_save_user_taxonomy');
 
 // Add User Tags admin page under Users menu
 function ut_add_user_tags_admin_page() {
-    add_users_page(__('User Tags'), __('User Tags'), 'manage_options', 'edit-tags.php?taxonomy=user_tag');
+    add_users_page(
+        __('User Tags'), // Page title
+        __('User Tags'), // Menu title
+        'manage_options', // Capability required
+        'edit-tags.php?taxonomy=user_tag' // Menu slug
+    );
 }
 add_action('admin_menu', 'ut_add_user_tags_admin_page');
 
-// Add User Tag filter dropdown to the Users table
-function ut_add_user_tag_filter() {
+// Add independent User Tag filter above the Users table
+function ut_add_independent_user_tag_filter() {
     $screen = get_current_screen();
     if ($screen->id != 'users') {
         return;
@@ -99,93 +116,62 @@ function ut_add_user_tag_filter() {
     ));
 
     if (!empty($terms)) {
-        echo '<select name="user_tag_filter" id="user_tag_filter">';
-        echo '<option value="">' . __('Filter by User Tag') . '</option>';
-        foreach ($terms as $term) {
-            $selected = (isset($_GET['user_tag_filter']) && $_GET['user_tag_filter'] == $term->term_id) ? 'selected="selected"' : '';
-            echo '<option value="' . $term->term_id . '" ' . $selected . '>' . $term->name . '</option>';
-        }
-        echo '</select>';
+        ?>
+        <div class="alignleft actions">
+            <select name="user_tag_filter" id="user_tag_filter">
+                <option value=""><?php _e('Filter by User Tag'); ?></option>
+                <?php foreach ($terms as $term): ?>
+                    <option value="<?php echo $term->term_id; ?>"><?php echo $term->name; ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <?php
     }
 }
-add_action('restrict_manage_users', 'ut_add_user_tag_filter');
+add_action('restrict_manage_users', 'ut_add_independent_user_tag_filter');
 
-// Filter users by selected User Tag
-function ut_filter_users_by_tag($query) {
-    if (!is_admin() || !$query->is_main_query()) {
-        return;
-    }
-
-    if (isset($_GET['user_tag_filter'])) {
-        $tag_id = intval($_GET['user_tag_filter']);
-        if ($tag_id) {
-            $query->set('tax_query', array(
-                array(
-                    'taxonomy' => 'user_tag',
-                    'field' => 'term_id',
-                    'terms' => $tag_id,
-                ),
-            ));
-        }
-    }
-}
-add_action('pre_get_users', 'ut_filter_users_by_tag');
-
-// Enqueue Select2 for dynamic User Tag search
-function ut_enqueue_select2() {
+// Enqueue Select2 and custom scripts
+function ut_enqueue_scripts() {
     wp_enqueue_script('select2', 'https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.13/js/select2.min.js', array('jquery'), '4.0.13', true);
     wp_enqueue_style('select2', 'https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.13/css/select2.min.css');
-}
-add_action('admin_enqueue_scripts', 'ut_enqueue_select2');
 
-// AJAX handler for User Tag search
-function ut_ajax_user_tag_search() {
-    $search = sanitize_text_field($_GET['q']);
-    $terms = get_terms(array(
-        'taxonomy' => 'user_tag',
-        'hide_empty' => false,
-        'search' => $search,
+    wp_enqueue_script('user-tags-ajax', plugin_dir_url(__FILE__) . 'user-tags-ajax.js', array('jquery'), '1.0', true);
+    wp_localize_script('user-tags-ajax', 'userTagsAjax', array(
+        'ajax_url' => admin_url('admin-ajax.php'),
+        'nonce' => wp_create_nonce('user_tags_nonce'),
+    ));
+}
+add_action('admin_enqueue_scripts', 'ut_enqueue_scripts');
+
+// AJAX handler to fetch users by custom field (primary_user_tag)
+function ut_ajax_filter_users_by_custom_field() {
+    check_ajax_referer('user_tags_nonce', 'nonce');
+
+    if (!isset($_POST['tag_id'])) {
+        wp_send_json_error('Invalid request');
+    }
+
+    $tag_id = intval($_POST['tag_id']);
+
+    // Fetch users with the selected custom field value
+    $users = get_users(array(
+        'meta_key' => 'primary_user_tag',
+        'meta_value' => $tag_id,
+        'meta_compare' => '=',
     ));
 
-    $results = array();
-    foreach ($terms as $term) {
-        $results[] = array(
-            'id' => $term->term_id,
-            'text' => $term->name,
+    $user_list = array();
+    foreach ($users as $user) {
+        $user_list[] = array(
+            'id' => $user->ID,
+            'username' => $user->user_login,
+            'name' => $user->display_name,
+            'email' => $user->user_email,
+            'role' => implode(', ', $user->roles),
+            'posts' => count_user_posts($user->ID), // Get the number of posts by the user
         );
     }
 
-    wp_send_json($results);
+    wp_send_json_success($user_list);
 }
-add_action('wp_ajax_user_tag_search', 'ut_ajax_user_tag_search');
-
-// Add dynamic User Tag search to the user profile page
-function ut_add_dynamic_user_tag_search() {
-    ?>
-    <script type="text/javascript">
-        jQuery(document).ready(function($) {
-            $('#user_tags').select2({
-                ajax: {
-                    url: '<?php echo admin_url('admin-ajax.php'); ?>',
-                    dataType: 'json',
-                    delay: 250,
-                    data: function(params) {
-                        return {
-                            q: params.term,
-                            action: 'user_tag_search'
-                        };
-                    },
-                    processResults: function(data) {
-                        return {
-                            results: data
-                        };
-                    },
-                    cache: true
-                },
-                minimumInputLength: 2
-            });
-        });
-    </script>
-    <?php
-}
-add_action('admin_footer', 'ut_add_dynamic_user_tag_search');
+add_action('wp_ajax_filter_users_by_custom_field', 'ut_ajax_filter_users_by_custom_field');
