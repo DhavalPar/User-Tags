@@ -1,0 +1,5 @@
+/* Custom styles for User Tags plugin */
+#user_tags {
+    width: 100%;
+    max-width: 25em;
+}
