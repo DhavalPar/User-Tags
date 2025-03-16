@@ -3,7 +3,7 @@
 Plugin Name: User Tags
 Description: A plugin to categorize users with custom taxonomies and filter based on custom fields.
 Version: 1.0
-Author: Your Name
+Author: Dhaval Parikh
 */
 
 // Prevent direct access to the file
